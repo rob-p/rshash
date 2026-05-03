@@ -5,26 +5,25 @@
 namespace cereal {
 
 template <class Archive>
-void save(Archive& ar, const gtl::flat_hash_set<uint64_t>& set) {
-    ar(static_cast<std::size_t>(set.size()));
-    for (const auto& elem : set) {
-        ar(elem);
+void save(Archive& ar, const gtl::flat_hash_map<uint64_t, uint64_t>& map) {
+    ar(static_cast<std::size_t>(map.size()));
+    for (const auto& [key, val] : map) {
+        ar(key, val);
     }
 }
 
 template <class Archive>
-void load(Archive& ar, gtl::flat_hash_set<uint64_t>& set) {
+void load(Archive& ar, gtl::flat_hash_map<uint64_t, uint64_t>& map) {
     std::size_t size;
     ar(size);
-    set.clear();
-    set.reserve(size);
+    map.clear();
+    map.reserve(size);
     for (std::size_t i = 0; i < size; ++i) {
-        uint64_t elem;
-        ar(elem);
-        set.insert(std::move(elem));
+        uint64_t key, val;
+        ar(key, val);
+        map.emplace(key, val);
     }
 }
-
 
 } // namespace cereal
 

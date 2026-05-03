@@ -21,7 +21,7 @@ uint64_t RSHash::lookup1(const std::vector<uint64_t> &kmers)
             occurences += check<1>(kmer, kmer_rc, offsets, p, no_minimiser, left_minimiser_position, right_minimiser_position);
         }
         else
-            occurences += hashmap.contains(std::min<uint64_t>(kmer, kmer_rc));
+            occurences += hashmap.count(std::min<uint64_t>(kmer, kmer_rc));
     }
 
     delete[] offsets;
@@ -54,7 +54,7 @@ uint64_t RSHash::lookup2(const std::vector<uint64_t> &kmers)
                 occurences += check<2>(kmer, kmer_rc, offsets, p, no_minimiser, left_minimiser_position, right_minimiser_position);
             }
             else
-                occurences += hashmap.contains(std::min<uint64_t>(kmer, kmer_rc));
+                occurences += hashmap.count(std::min<uint64_t>(kmer, kmer_rc));
         }
     }
 
@@ -96,7 +96,7 @@ uint64_t RSHash::lookup3(const std::vector<uint64_t> &kmers)
                     occurences += check<3>(kmer, kmer_rc, offsets, p, no_minimiser, left_minimiser_position, right_minimiser_position);
                 }
                 else
-                    occurences += hashmap.contains(std::min<uint64_t>(kmer, kmer_rc));
+                    occurences += hashmap.count(std::min<uint64_t>(kmer, kmer_rc));
             }
         }
     }
@@ -488,7 +488,7 @@ uint64_t RSHash::streaming_lookup1(const seqan3::bitpacked_sequence<seqan3::dna4
                 current_minimiser1 = minimiser1;
             }    
             else {
-                occurences += hashmap.contains(std::min<uint64_t>(window.kmer_value, window.kmer_value_rev));
+                occurences += hashmap.count(std::min<uint64_t>(window.kmer_value, window.kmer_value_rev));
                 found = false;
                 current_neg_minimiser1 = minimiser1;
             }
@@ -581,7 +581,7 @@ uint64_t RSHash::streaming_lookup2(const seqan3::bitpacked_sequence<seqan3::dna4
                     current_neg_minimiser1 = minimiser1;
                 }   
                 else {
-                    occurences += hashmap.contains(std::min<uint64_t>(window.kmer_value, window.kmer_value_rev));
+                    occurences += hashmap.count(std::min<uint64_t>(window.kmer_value, window.kmer_value_rev));
                     found = false;
                     current_neg_minimiser1 = minimiser1;
                     current_neg_minimiser2 = minimiser2;
@@ -711,7 +711,7 @@ uint64_t RSHash::streaming_lookup3(const seqan3::bitpacked_sequence<seqan3::dna4
                         current_neg_minimiser2 = minimiser2;
                     }
                     else {
-                        occurences += hashmap.contains(std::min<uint64_t>(window.kmer_value, window.kmer_value_rev));
+                        occurences += hashmap.count(std::min<uint64_t>(window.kmer_value, window.kmer_value_rev));
                         found = false;
                         current_neg_minimiser1 = minimiser1;
                         current_neg_minimiser2 = minimiser2;
@@ -791,14 +791,12 @@ inline void RSHash::report_minimiser_pos2(uint64_t *buffer, const uint64_t offse
     if(buffer[s+right_minimiser_pos] == kmer) {
         const uint64_t text_pos = offset + right_minimiser_pos + k - 1;
         if(check_overlap<level>(offset, text_pos-k+1, start_pos, end_pos))
-            // std:: cout << '(' << text_pos << ',' << 1 <<  ')';
-            positions.emplace_back(text_pos, true);
+            positions.emplace_back(text_pos, false);
     }
     if(buffer[s+span-1-right_minimiser_pos] == kmerrc) {
         const uint64_t text_pos = offset + span-1-right_minimiser_pos;
         if(check_overlap<level>(offset, text_pos, start_pos, end_pos))
-            // std:: cout << '(' << text_pos << ',' << 0 <<  ')';
-            positions.emplace_back(text_pos, false);
+            positions.emplace_back(text_pos, true);
     }
 }
 
@@ -875,7 +873,7 @@ void RSHash::streaming_locate(const seqan3::bitpacked_sequence<seqan3::dna4> &qu
         }
         else {
             current_neg_minimiser = minimiser;
-            // if(hashmap.contains(std::min<uint64_t>(kmer.kmer_value, kmer.kmer_value_rev)))
+            // if(hashmap.count(std::min<uint64_t>(kmer.kmer_value, kmer.kmer_value_rev)))
         }
 
     }
@@ -883,4 +881,94 @@ void RSHash::streaming_locate(const seqan3::bitpacked_sequence<seqan3::dna4> &qu
     delete[] kmer_buffer;
     delete[] offsets;
 
+}
+
+
+std::optional<LocateResult> RSHash::locate_kmer(uint64_t kmer_fw, uint64_t kmer_rc)
+{
+    const uint64_t shift = 2*(k-1);
+    size_t left_pos, right_pos;
+    uint64_t text_pos;
+    bool forward;
+    uint64_t start_pos = 0, end_pos = 0;
+    uint64_t minimiser, minimiser_rank;
+
+    auto make_result = [&](uint64_t tp, bool fwd) -> LocateResult {
+        uint64_t kmer_start = fwd ? (tp - k + 1) : tp;
+        uint64_t rank = endpoints.rank(kmer_start + 1);
+        uint64_t uid = rank - 2;
+        uint64_t ustart = endpoints.select(rank - 1);
+        uint64_t uend = endpoints.select(rank);
+        return LocateResult{tp, fwd, uid,
+            static_cast<uint32_t>(kmer_start - ustart),
+            static_cast<uint32_t>(uend - ustart)};
+    };
+
+    uint64_t max_thres = m_thres1;
+    if (level > 1) max_thres = std::max(max_thres, m_thres2);
+    if (level > 2) max_thres = std::max(max_thres, m_thres3);
+    uint64_t max_span = span1;
+    if (level > 1) max_span = std::max(max_span, span2);
+    if (level > 2) max_span = std::max(max_span, span3);
+
+    uint64_t* offsets_buf = new uint64_t[max_thres];
+    uint64_t* kmer_buffer = new uint64_t[max_thres * max_span];
+
+    // Level 1
+    minimiser = find_minimiser<1>(kmer_fw, kmer_rc, left_pos, right_pos);
+    if (minimiser_rank = r1.rank(minimiser); r1.rank(minimiser + 1) - minimiser_rank) {
+        size_t p = s1_select.select(minimiser_rank);
+        size_t no_min = s1_select.select(minimiser_rank + 1) - p;
+        fill_buffer<1>(offsets_buf, kmer_buffer, p, no_min, shift);
+        if (lookup_buffer<1>(kmer_buffer, offsets_buf, no_min, kmer_fw, kmer_rc, text_pos, left_pos, right_pos, forward, start_pos, end_pos)) {
+            auto result = make_result(text_pos, forward);
+            delete[] offsets_buf; delete[] kmer_buffer;
+            return result;
+        }
+    }
+
+    // Level 2
+    if (level > 1) {
+        minimiser = find_minimiser<2>(kmer_fw, kmer_rc, left_pos, right_pos);
+        if (minimiser_rank = r2.rank(minimiser); r2.rank(minimiser + 1) - minimiser_rank) {
+            size_t p = s2_select.select(minimiser_rank);
+            size_t no_min = s2_select.select(minimiser_rank + 1) - p;
+            fill_buffer<2>(offsets_buf, kmer_buffer, p, no_min, shift);
+            if (lookup_buffer<2>(kmer_buffer, offsets_buf, no_min, kmer_fw, kmer_rc, text_pos, left_pos, right_pos, forward, start_pos, end_pos)) {
+                auto result = make_result(text_pos, forward);
+                delete[] offsets_buf; delete[] kmer_buffer;
+                return result;
+            }
+        }
+    }
+
+    // Level 3
+    if (level > 2) {
+        minimiser = find_minimiser<3>(kmer_fw, kmer_rc, left_pos, right_pos);
+        if (minimiser_rank = r3.rank(minimiser); r3.rank(minimiser + 1) - minimiser_rank) {
+            size_t p = s3_select.select(minimiser_rank);
+            size_t no_min = s3_select.select(minimiser_rank + 1) - p;
+            fill_buffer<3>(offsets_buf, kmer_buffer, p, no_min, shift);
+            if (lookup_buffer<3>(kmer_buffer, offsets_buf, no_min, kmer_fw, kmer_rc, text_pos, left_pos, right_pos, forward, start_pos, end_pos)) {
+                auto result = make_result(text_pos, forward);
+                delete[] offsets_buf; delete[] kmer_buffer;
+                return result;
+            }
+        }
+    }
+
+    delete[] offsets_buf;
+    delete[] kmer_buffer;
+
+    // Hashmap fallback
+    uint64_t canonical = std::min<uint64_t>(kmer_fw, kmer_rc);
+    auto it = hashmap.find(canonical);
+    if (it != hashmap.end()) {
+        uint64_t stored_pos = it->second;
+        uint64_t text_kmer = get_word64(stored_pos) & kmermask;
+        bool fwd = (text_kmer == kmer_fw);
+        return make_result(fwd ? (stored_pos + k - 1) : stored_pos, fwd);
+    }
+
+    return std::nullopt;
 }

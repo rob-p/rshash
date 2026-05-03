@@ -1,5 +1,13 @@
 #include <sharg/all.hpp>
 #include "rshash.hpp"
+#include "reference_index.hpp"
+
+void build_reference_index(
+    const std::string& cf_basename,
+    const std::string& output_basename,
+    uint64_t k, uint8_t level,
+    uint8_t m1, uint8_t m2, uint8_t m3,
+    uint8_t t1, uint8_t t2, uint16_t t3);
 
 
 std::vector<uint64_t> rand_kmers(const uint64_t n, const uint64_t k)
@@ -37,7 +45,7 @@ struct cmd_arguments {
 };
 
 void initialise_argument_parser(sharg::parser &parser, cmd_arguments &args) {
-    parser.add_positional_option(args.cmd, sharg::config{.description = "command options: build, lookup, locate, bench"});
+    parser.add_positional_option(args.cmd, sharg::config{.description = "command options: build, lookup, locate, bench, build-ref, query-ref"});
     parser.add_option(args.i, sharg::config{.short_id = 'i', .long_id = "input", .description = "provide input file"});
     parser.add_option(args.q, sharg::config{.short_id = 'q', .long_id = "query", .description = "provide query file"});
     parser.add_option(args.d, sharg::config{.short_id = 'd', .long_id = "dict", .description = "provide dict file"});
@@ -67,6 +75,18 @@ int check_arguments(sharg::parser &parser, cmd_arguments &args) {
             throw sharg::user_input_error("provide query file.");
     }
     else if(args.cmd == "locate") {
+        if(!parser.is_option_set('q'))
+            throw sharg::user_input_error("provide query file.");
+    }
+    else if(args.cmd == "build-ref") {
+        if(!parser.is_option_set('i'))
+            throw sharg::user_input_error("provide cuttlefish basename.");
+        if(!parser.is_option_set('k'))
+            throw sharg::user_input_error("specify k");
+        if(!parser.is_option_set('l'))
+            throw sharg::user_input_error("specify level");
+    }
+    else if(args.cmd == "query-ref") {
         if(!parser.is_option_set('q'))
             throw sharg::user_input_error("provide query file.");
     }
@@ -239,7 +259,71 @@ int main(int argc, char** argv)
         std::cout << "num_negative_kmers = " << found << " (" << (double) found/kmers.size()*100 << "%)\n";
         std::cout << "neg_time_per_kmer = " << ns_per_kmer << '\n';
     }
- 
+    else if(args.cmd == "build-ref")
+    {
+        build_reference_index(args.i.string(), args.d.string(),
+                              args.k, args.l, args.m1, args.m2, args.m3,
+                              args.t1, args.t2, args.t3);
+    }
+    else if(args.cmd == "query-ref")
+    {
+        std::cout << "loading reference index...\n";
+        ReferenceIndex refidx;
+        refidx.load(args.d.string());
+
+        std::cout << "loading queries...\n";
+        std::vector<seqan3::bitpacked_sequence<seqan3::dna4>> queries;
+        load_file(args.q, queries);
+
+        const uint64_t kval = refidx.k();
+        const uint64_t kmask = compute_mask(2u * kval);
+        const auto& ctab = refidx.contig_table();
+        uint64_t total_kmers = 0;
+        uint64_t found_kmers = 0;
+
+        std::chrono::high_resolution_clock::time_point t_start = std::chrono::high_resolution_clock::now();
+
+        for (size_t qi = 0; qi < queries.size(); ++qi) {
+            auto& query = queries[qi];
+            if (query.size() < kval) continue;
+
+            uint64_t kmer_fw = 0;
+            uint64_t kmer_rc = 0;
+            const uint64_t shift = 2 * (kval - 1);
+
+            for (size_t i = 0; i < query.size(); ++i) {
+                uint64_t base = seqan3::to_rank(query[i]);
+                kmer_fw = (kmer_fw >> 2) | (base << shift);
+                kmer_rc = ((kmer_rc << 2) | (base ^ 3ULL)) & kmask;
+
+                if (i >= kval - 1) {
+                    total_kmers++;
+                    auto hits = refidx.query_kmer(kmer_fw, kmer_rc);
+                    if (!hits.empty()) {
+                        found_kmers++;
+                        std::cout << "q" << qi << ":" << (i - kval + 1) << " " << hits;
+                        for (auto it = hits.refRange.begin(); it != hits.refRange.end(); ++it) {
+                            auto rp = hits.decode_hit(*it, ctab);
+                            std::cout << " -> ref:" << ctab.decode_ref_id(*it)
+                                      << " pos:" << rp.pos
+                                      << " " << (rp.isFW ? "fw" : "rc");
+                        }
+                        std::cout << "\n";
+                    }
+                }
+            }
+        }
+
+        std::chrono::high_resolution_clock::time_point t_stop = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(t_stop - t_start);
+
+        std::cout << "==== query-ref report:\n";
+        std::cout << "total_kmers = " << total_kmers << "\n";
+        std::cout << "found_kmers = " << found_kmers << " ("
+                  << (total_kmers > 0 ? (double)found_kmers/total_kmers*100 : 0) << "%)\n";
+        std::cout << "time_per_kmer = " << (total_kmers > 0 ? (double)elapsed.count()/total_kmers : 0) << " ns\n";
+    }
+
     return 0;
 }
 

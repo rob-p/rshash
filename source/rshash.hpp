@@ -1,8 +1,12 @@
+#ifndef RSHASH_HPP
+#define RSHASH_HPP
+
 #include <seqan3/alphabet/nucleotide/dna4.hpp>
 #include <seqan3/alphabet/container/bitpacked_sequence.hpp>
 #include <seqan3/io/sequence_file/all.hpp>
 #include <sux/bits/SimpleSelect.hpp>
 #include <gtl/phmap.hpp>
+#include <optional>
 #include "compact_vector.hpp"
 #include "EliasFano.hpp"
 #include "minimiser_views.hpp"
@@ -21,6 +25,14 @@ struct SkmerInfo {
     size_t seq_id;
     size_t start;
     size_t end;
+};
+
+struct LocateResult {
+    uint64_t text_pos;
+    bool is_forward;
+    uint64_t unitig_id;
+    uint32_t contig_pos;
+    uint32_t contig_len;
 };
 
 // struct MinimizerInfo32 {
@@ -68,9 +80,6 @@ struct RadixTraitsMinimizer64 {
 
 
 
-#ifndef RSHASH_HPP
-#define RSHASH_HPP
-
 class RSHash
 {
 private:
@@ -83,9 +92,9 @@ private:
     sux::bits::EliasFano<sux::util::AllocType::MALLOC> r1, r2, r3;
     bit_vector s1, s2, s3;
     sux::bits::SimpleSelect<sux::util::AllocType::MALLOC> s1_select, s2_select, s3_select;
-    bits::compact_vector offsets1, offsets2, offsets3;
+    ::bits::compact_vector offsets1, offsets2, offsets3;
     // std::vector<uint32_t> offsets1, offsets2, offsets3;
-    gtl::flat_hash_set<uint64_t> hashmap;
+    gtl::flat_hash_map<uint64_t, uint64_t> hashmap;
     sux::bits::EliasFano<sux::util::AllocType::MALLOC> endpoints;
     std::vector<uint64_t> text;
     template<int level, typename MinimizerT>
@@ -157,7 +166,9 @@ public:
     {}
     uint8_t getk() { return k; }
     uint64_t number_unitigs() { return endpoints.rank(endpoints.size()); }
+    uint64_t num_real_unitigs() { return endpoints.rank(endpoints.size()) - 2; }
     size_t unitig_size(uint64_t unitig_id) { return endpoints.select(unitig_id+1) - endpoints.select(unitig_id) - k + 1; }
+    std::optional<LocateResult> locate_kmer(uint64_t kmer_fw, uint64_t kmer_rc);
     // std::vector<uint64_t> rand_text_kmers(const uint64_t);
     const inline uint64_t access(const uint64_t, const size_t);
     uint64_t lookup(const std::vector<uint64_t>&);

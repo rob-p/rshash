@@ -163,7 +163,7 @@ void stats(const std::vector<seqan3::bitpacked_sequence<seqan3::dna4>> &input, c
     // std::cout << "compute kmer coverage...\n";
     std::vector<uint64_t> kmers_uncovered = get_uncovered_kmers(input, m, t, k, 1, r, s_select);
 
-    uint64_t counter[t] = {0};
+    std::vector<uint64_t> counter(t, 0);
     for(uint8_t count : counts) {
         counter[count-1]++;
     }

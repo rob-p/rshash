@@ -119,7 +119,7 @@ inline uint64_t RSHash::get_minimizers(const std::vector<seqan3::bitpacked_seque
     filter_freq_minimizers<level, MinimizerT>(minimizers, counts, no_minimizers, no_skmers);
 
     std::cout << "filling minimiser offsets...\n";
-    bits::compact_vector::builder builder;
+    ::bits::compact_vector::builder builder;
     builder.resize(no_skmers, std::bit_width(endpoints.size()));
     for(size_t i = 0; i < no_skmers; i++)
         builder.push_back(minimizers[i].second);
@@ -363,8 +363,13 @@ void RSHash::build(const std::vector<seqan3::bitpacked_sequence<seqan3::dna4>>& 
     hashmap.reserve(freq_kmers);
     for(const auto & skmer_info : freq_skmers) {
         auto skmer = input[skmer_info.seq_id] | std::views::drop(skmer_info.start) | std::views::take(skmer_info.end - skmer_info.start);
-        for(auto && kmer : skmer | rshash::views::kmerview({.window_size = k}))
-            hashmap.insert(std::min<uint64_t>(kmer.kmer_value, kmer.kmer_value_rev));
+        uint64_t seq_start = endpoints.select(skmer_info.seq_id + 1);
+        uint64_t j = 0;
+        for(auto && kmer : skmer | rshash::views::kmerview({.window_size = k})) {
+            uint64_t text_pos = seq_start + skmer_info.start + j;
+            hashmap.emplace(std::min<uint64_t>(kmer.kmer_value, kmer.kmer_value_rev), text_pos);
+            j++;
+        }
     }
 
     std::cout << "copy text...\n";
