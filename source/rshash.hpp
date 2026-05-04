@@ -140,7 +140,9 @@ private:
     template<int level>
     inline void locate_buffer(uint64_t*, uint64_t*, const size_t, const uint64_t, const uint64_t, const size_t, const size_t, uint64_t &, uint64_t &, std::vector<std::pair<uint64_t, bool>> &);
 
-
+    void streaming_query_ref1(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::optional<LocateResult>>&, uint64_t&);
+    void streaming_query_ref2(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::optional<LocateResult>>&, uint64_t&);
+    void streaming_query_ref3(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::optional<LocateResult>>&, uint64_t&);
 
 public:
     RSHash() : endpoints(std::vector<uint64_t>{}, 1),
@@ -175,6 +177,7 @@ public:
     void build(const std::vector<seqan3::bitpacked_sequence<seqan3::dna4>>&);
     uint64_t streaming_lookup(const seqan3::bitpacked_sequence<seqan3::dna4>&, uint64_t&);
     void streaming_locate(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::pair<uint64_t, bool>> &positions);
+    void streaming_query_ref(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::optional<LocateResult>>&, uint64_t&);
     int save(const std::filesystem::path&);
     int load(const std::filesystem::path&);
     void print_info() {

@@ -58,6 +58,12 @@ public:
         };
     }
 
+    void streaming_query(const seqan3::bitpacked_sequence<seqan3::dna4>& query,
+                         std::vector<std::optional<LocateResult>>& results,
+                         uint64_t& extensions) const {
+        m_dict.streaming_query_ref(query, results, extensions);
+    }
+
     uint64_t k() const { return m_dict.getk(); }
     uint64_t num_refs() const { return m_ref_names.size(); }
     const std::string& ref_name(size_t i) const { return m_ref_names[i]; }

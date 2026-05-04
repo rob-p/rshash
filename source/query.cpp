@@ -972,3 +972,461 @@ std::optional<LocateResult> RSHash::locate_kmer(uint64_t kmer_fw, uint64_t kmer_
 
     return std::nullopt;
 }
+
+
+void RSHash::streaming_query_ref(const seqan3::bitpacked_sequence<seqan3::dna4> &query,
+    std::vector<std::optional<LocateResult>> &results, uint64_t &extensions)
+{
+    if(level == 1)
+        streaming_query_ref1(query, results, extensions);
+    else if(level == 2)
+        streaming_query_ref2(query, results, extensions);
+    else if(level == 3)
+        streaming_query_ref3(query, results, extensions);
+}
+
+
+void RSHash::streaming_query_ref1(const seqan3::bitpacked_sequence<seqan3::dna4> &query,
+    std::vector<std::optional<LocateResult>> &results, uint64_t &extensions)
+{
+    const uint64_t shift = 2*(k-1);
+    constexpr uint64_t INF = std::numeric_limits<uint64_t>::max();
+    uint64_t current_minimiser1=INF;
+    uint64_t current_neg_minimiser1=INF;
+    uint64_t* offsets1 = new uint64_t[m_thres1];
+    uint64_t* buffer1 = new uint64_t[m_thres1 * span1];
+    size_t no_skmers1;
+    uint64_t unitig_begin, unitig_end;
+    uint64_t text_pos;
+    bool forward;
+    bool found = false;
+    bool rolling = false;
+    size_t left_minimiser1_position, right_minimiser1_position;
+    uint64_t minimiser1, minimiser1_rank;
+    uint64_t current_uid = 0;
+
+    for(auto && window : query | rshash::views::kmerview({.window_size = k}))
+    {
+        if(found && extend_in_text(text_pos, unitig_begin, unitig_end, forward, window.kmer_value, window.kmer_value_rev)) {
+            uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+            results.push_back(LocateResult{text_pos, forward, current_uid,
+                static_cast<uint32_t>(kmer_start - unitig_begin),
+                static_cast<uint32_t>(unitig_end - unitig_begin)});
+            extensions++;
+            rolling = false;
+        }
+        else {
+            if(rolling)
+                update_minimiser<1>(window.kmer_value, window.kmer_value_rev, minimiser1, left_minimiser1_position, right_minimiser1_position);
+            else {
+                minimiser1 = find_minimiser<1>(window.kmer_value, window.kmer_value_rev, left_minimiser1_position, right_minimiser1_position);
+                rolling = true;
+            }
+
+            if(minimiser1 == current_minimiser1) {
+                found = lookup_buffer<1>(buffer1, offsets1, no_skmers1, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser1_position, right_minimiser1_position, forward, unitig_begin, unitig_end);
+                if(found) {
+                    uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                    current_uid = endpoints.rank(kmer_start + 1) - 2;
+                    results.push_back(LocateResult{text_pos, forward, current_uid,
+                        static_cast<uint32_t>(kmer_start - unitig_begin),
+                        static_cast<uint32_t>(unitig_end - unitig_begin)});
+                }
+                else
+                    results.push_back(std::nullopt);
+            }
+            else if(minimiser1 != current_neg_minimiser1 && (minimiser1_rank = r1.rank(minimiser1), r1.rank(minimiser1 + 1) - minimiser1_rank)) {
+                size_t p = s1_select.select(minimiser1_rank);
+                no_skmers1 = s1_select.select(minimiser1_rank+1) - p;
+
+                fill_buffer<1>(offsets1, buffer1, p, no_skmers1, shift);
+                found = lookup_buffer<1>(buffer1, offsets1, no_skmers1, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser1_position, right_minimiser1_position, forward, unitig_begin, unitig_end);
+                if(found) {
+                    uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                    current_uid = endpoints.rank(kmer_start + 1) - 2;
+                    results.push_back(LocateResult{text_pos, forward, current_uid,
+                        static_cast<uint32_t>(kmer_start - unitig_begin),
+                        static_cast<uint32_t>(unitig_end - unitig_begin)});
+                }
+                else
+                    results.push_back(std::nullopt);
+                current_minimiser1 = minimiser1;
+            }
+            else {
+                uint64_t canonical = std::min<uint64_t>(window.kmer_value, window.kmer_value_rev);
+                auto it = hashmap.find(canonical);
+                if(it != hashmap.end()) {
+                    uint64_t stored_pos = it->second;
+                    uint64_t text_kmer = get_word64(stored_pos) & kmermask;
+                    forward = (text_kmer == window.kmer_value);
+                    text_pos = forward ? (stored_pos + k - 1) : stored_pos;
+                    uint64_t r = endpoints.rank(stored_pos + 1);
+                    current_uid = r - 2;
+                    unitig_begin = endpoints.select(r - 1);
+                    unitig_end = endpoints.select(r);
+                    results.push_back(LocateResult{text_pos, forward, current_uid,
+                        static_cast<uint32_t>(stored_pos - unitig_begin),
+                        static_cast<uint32_t>(unitig_end - unitig_begin)});
+                    found = true;
+                }
+                else {
+                    results.push_back(std::nullopt);
+                    found = false;
+                }
+                current_neg_minimiser1 = minimiser1;
+            }
+        }
+    }
+
+    delete[] offsets1;
+    delete[] buffer1;
+}
+
+
+void RSHash::streaming_query_ref2(const seqan3::bitpacked_sequence<seqan3::dna4> &query,
+    std::vector<std::optional<LocateResult>> &results, uint64_t &extensions)
+{
+    auto view = rshash::views::kmerview({.window_size = k});
+    const uint64_t shift = 2*(k-1);
+    constexpr uint64_t INF = std::numeric_limits<uint64_t>::max();
+    uint64_t current_minimiser1=INF, current_minimiser2=INF;
+    uint64_t current_neg_minimiser1=INF, current_neg_minimiser2=INF;
+    uint64_t* offsets1 = new uint64_t[m_thres1];
+    uint64_t* offsets2 = new uint64_t[m_thres2];
+    uint64_t* buffer1 = new uint64_t[m_thres1 * span1];
+    uint64_t* buffer2 = new uint64_t[m_thres2 * span2];
+    size_t no_skmers1, no_skmers2;
+    uint64_t unitig_begin, unitig_end;
+    uint64_t text_pos;
+    bool forward;
+    bool found = false;
+    bool rolling1 = false;
+    bool rolling2 = false;
+    size_t left_minimiser1_position, right_minimiser1_position;
+    uint64_t minimiser1, minimiser1_rank;
+    size_t left_minimiser2_position, right_minimiser2_position;
+    uint64_t minimiser2, minimiser2_rank;
+    uint64_t current_uid = 0;
+
+    for(auto && window : query | view)
+    {
+        if(found && extend_in_text(text_pos, unitig_begin, unitig_end, forward, window.kmer_value, window.kmer_value_rev)) {
+            uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+            results.push_back(LocateResult{text_pos, forward, current_uid,
+                static_cast<uint32_t>(kmer_start - unitig_begin),
+                static_cast<uint32_t>(unitig_end - unitig_begin)});
+            extensions++;
+            rolling1 = false;
+            rolling2 = false;
+        }
+        else {
+            if(rolling1)
+                update_minimiser<1>(window.kmer_value, window.kmer_value_rev, minimiser1, left_minimiser1_position, right_minimiser1_position);
+            else {
+                minimiser1 = find_minimiser<1>(window.kmer_value, window.kmer_value_rev, left_minimiser1_position, right_minimiser1_position);
+                rolling1 = true;
+            }
+
+            if(minimiser1 == current_minimiser1) {
+                found = lookup_buffer<1>(buffer1, offsets1, no_skmers1, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser1_position, right_minimiser1_position, forward, unitig_begin, unitig_end);
+                if(found) {
+                    uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                    current_uid = endpoints.rank(kmer_start + 1) - 2;
+                    results.push_back(LocateResult{text_pos, forward, current_uid,
+                        static_cast<uint32_t>(kmer_start - unitig_begin),
+                        static_cast<uint32_t>(unitig_end - unitig_begin)});
+                }
+                else
+                    results.push_back(std::nullopt);
+                rolling2 = false;
+            }
+            else if(minimiser1 != current_neg_minimiser1 && (minimiser1_rank = r1.rank(minimiser1), r1.rank(minimiser1 + 1) - minimiser1_rank)) {
+                const size_t p = s1_select.select(minimiser1_rank);
+                no_skmers1 = s1_select.select(minimiser1_rank+1) - p;
+
+                fill_buffer<1>(offsets1, buffer1, p, no_skmers1, shift);
+                found = lookup_buffer<1>(buffer1, offsets1, no_skmers1, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser1_position, right_minimiser1_position, forward, unitig_begin, unitig_end);
+                if(found) {
+                    uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                    current_uid = endpoints.rank(kmer_start + 1) - 2;
+                    results.push_back(LocateResult{text_pos, forward, current_uid,
+                        static_cast<uint32_t>(kmer_start - unitig_begin),
+                        static_cast<uint32_t>(unitig_end - unitig_begin)});
+                }
+                else
+                    results.push_back(std::nullopt);
+                current_minimiser1 = minimiser1;
+                rolling2 = false;
+            }
+            else {
+                if(rolling2)
+                    update_minimiser<2>(window.kmer_value, window.kmer_value_rev, minimiser2, left_minimiser2_position, right_minimiser2_position);
+                else {
+                    minimiser2 = find_minimiser<2>(window.kmer_value, window.kmer_value_rev, left_minimiser2_position, right_minimiser2_position);
+                    rolling2 = true;
+                }
+
+                if(minimiser2 == current_minimiser2) {
+                    found = lookup_buffer<2>(buffer2, offsets2, no_skmers2, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser2_position, right_minimiser2_position, forward, unitig_begin, unitig_end);
+                    if(found) {
+                        uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                        current_uid = endpoints.rank(kmer_start + 1) - 2;
+                        results.push_back(LocateResult{text_pos, forward, current_uid,
+                            static_cast<uint32_t>(kmer_start - unitig_begin),
+                            static_cast<uint32_t>(unitig_end - unitig_begin)});
+                    }
+                    else
+                        results.push_back(std::nullopt);
+                }
+                else if(minimiser2 != current_neg_minimiser2 && (minimiser2_rank = r2.rank(minimiser2), r2.rank(minimiser2 + 1) - minimiser2_rank)) {
+                    const size_t p = s2_select.select(minimiser2_rank);
+                    no_skmers2 = s2_select.select(minimiser2_rank+1) - p;
+
+                    fill_buffer<2>(offsets2, buffer2, p, no_skmers2, shift);
+                    found = lookup_buffer<2>(buffer2, offsets2, no_skmers2, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser2_position, right_minimiser2_position, forward, unitig_begin, unitig_end);
+                    if(found) {
+                        uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                        current_uid = endpoints.rank(kmer_start + 1) - 2;
+                        results.push_back(LocateResult{text_pos, forward, current_uid,
+                            static_cast<uint32_t>(kmer_start - unitig_begin),
+                            static_cast<uint32_t>(unitig_end - unitig_begin)});
+                    }
+                    else
+                        results.push_back(std::nullopt);
+                    current_minimiser2 = minimiser2;
+                    current_neg_minimiser1 = minimiser1;
+                }
+                else {
+                    uint64_t canonical = std::min<uint64_t>(window.kmer_value, window.kmer_value_rev);
+                    auto it = hashmap.find(canonical);
+                    if(it != hashmap.end()) {
+                        uint64_t stored_pos = it->second;
+                        uint64_t text_kmer = get_word64(stored_pos) & kmermask;
+                        forward = (text_kmer == window.kmer_value);
+                        text_pos = forward ? (stored_pos + k - 1) : stored_pos;
+                        uint64_t r = endpoints.rank(stored_pos + 1);
+                        current_uid = r - 2;
+                        unitig_begin = endpoints.select(r - 1);
+                        unitig_end = endpoints.select(r);
+                        results.push_back(LocateResult{text_pos, forward, current_uid,
+                            static_cast<uint32_t>(stored_pos - unitig_begin),
+                            static_cast<uint32_t>(unitig_end - unitig_begin)});
+                        found = true;
+                    }
+                    else {
+                        results.push_back(std::nullopt);
+                        found = false;
+                    }
+                    current_neg_minimiser1 = minimiser1;
+                    current_neg_minimiser2 = minimiser2;
+                }
+            }
+        }
+    }
+
+    delete[] offsets1;
+    delete[] offsets2;
+    delete[] buffer1;
+    delete[] buffer2;
+}
+
+
+void RSHash::streaming_query_ref3(const seqan3::bitpacked_sequence<seqan3::dna4> &query,
+    std::vector<std::optional<LocateResult>> &results, uint64_t &extensions)
+{
+    auto view = rshash::views::kmerview({.window_size = k});
+    const uint64_t shift = 2*(k-1);
+    constexpr uint64_t INF = std::numeric_limits<uint64_t>::max();
+    uint64_t current_minimiser1=INF, current_minimiser2=INF, current_minimiser3=INF;
+    uint64_t current_neg_minimiser1=INF, current_neg_minimiser2=INF, current_neg_minimiser3=INF;
+    uint64_t* offsets1 = new uint64_t[m_thres1];
+    uint64_t* offsets2 = new uint64_t[m_thres2];
+    uint64_t* offsets3 = new uint64_t[m_thres3];
+    uint64_t* buffer1 = new uint64_t[m_thres1 * span1];
+    uint64_t* buffer2 = new uint64_t[m_thres2 * span2];
+    uint64_t* buffer3 = new uint64_t[m_thres3 * span3];
+    size_t no_skmers1, no_skmers2, no_skmers3;
+    uint64_t unitig_begin, unitig_end;
+    uint64_t text_pos;
+    bool forward;
+    bool found = false;
+    bool rolling1 = false;
+    bool rolling2 = false;
+    bool rolling3 = false;
+    size_t left_minimiser1_position, right_minimiser1_position;
+    uint64_t minimiser1, minimiser1_rank;
+    size_t left_minimiser2_position, right_minimiser2_position;
+    uint64_t minimiser2, minimiser2_rank;
+    size_t left_minimiser3_position, right_minimiser3_position;
+    uint64_t minimiser3, minimiser3_rank;
+    uint64_t current_uid = 0;
+
+    for(auto && window : query | view)
+    {
+        if(found && extend_in_text(text_pos, unitig_begin, unitig_end, forward, window.kmer_value, window.kmer_value_rev)) {
+            uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+            results.push_back(LocateResult{text_pos, forward, current_uid,
+                static_cast<uint32_t>(kmer_start - unitig_begin),
+                static_cast<uint32_t>(unitig_end - unitig_begin)});
+            extensions++;
+            rolling1 = false;
+            rolling2 = false;
+            rolling3 = false;
+        }
+        else {
+            if(rolling1)
+                update_minimiser<1>(window.kmer_value, window.kmer_value_rev, minimiser1, left_minimiser1_position, right_minimiser1_position);
+            else {
+                minimiser1 = find_minimiser<1>(window.kmer_value, window.kmer_value_rev, left_minimiser1_position, right_minimiser1_position);
+                rolling1 = true;
+            }
+
+            if(minimiser1 == current_minimiser1) {
+                found = lookup_buffer<1>(buffer1, offsets1, no_skmers1, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser1_position, right_minimiser1_position, forward, unitig_begin, unitig_end);
+                if(found) {
+                    uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                    current_uid = endpoints.rank(kmer_start + 1) - 2;
+                    results.push_back(LocateResult{text_pos, forward, current_uid,
+                        static_cast<uint32_t>(kmer_start - unitig_begin),
+                        static_cast<uint32_t>(unitig_end - unitig_begin)});
+                }
+                else
+                    results.push_back(std::nullopt);
+                rolling2 = false;
+                rolling3 = false;
+            }
+            else if(minimiser1 != current_neg_minimiser1 && (minimiser1_rank = r1.rank(minimiser1), r1.rank(minimiser1 + 1) - minimiser1_rank)) {
+                const size_t p = s1_select.select(minimiser1_rank);
+                no_skmers1 = s1_select.select(minimiser1_rank+1) - p;
+
+                fill_buffer<1>(offsets1, buffer1, p, no_skmers1, shift);
+                found = lookup_buffer<1>(buffer1, offsets1, no_skmers1, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser1_position, right_minimiser1_position, forward, unitig_begin, unitig_end);
+                if(found) {
+                    uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                    current_uid = endpoints.rank(kmer_start + 1) - 2;
+                    results.push_back(LocateResult{text_pos, forward, current_uid,
+                        static_cast<uint32_t>(kmer_start - unitig_begin),
+                        static_cast<uint32_t>(unitig_end - unitig_begin)});
+                }
+                else
+                    results.push_back(std::nullopt);
+                current_minimiser1 = minimiser1;
+                rolling2 = false;
+                rolling3 = false;
+            }
+            else {
+                if(rolling2)
+                    update_minimiser<2>(window.kmer_value, window.kmer_value_rev, minimiser2, left_minimiser2_position, right_minimiser2_position);
+                else {
+                    minimiser2 = find_minimiser<2>(window.kmer_value, window.kmer_value_rev, left_minimiser2_position, right_minimiser2_position);
+                    rolling2 = true;
+                }
+
+                if(minimiser2 == current_minimiser2) {
+                    found = lookup_buffer<2>(buffer2, offsets2, no_skmers2, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser2_position, right_minimiser2_position, forward, unitig_begin, unitig_end);
+                    if(found) {
+                        uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                        current_uid = endpoints.rank(kmer_start + 1) - 2;
+                        results.push_back(LocateResult{text_pos, forward, current_uid,
+                            static_cast<uint32_t>(kmer_start - unitig_begin),
+                            static_cast<uint32_t>(unitig_end - unitig_begin)});
+                    }
+                    else
+                        results.push_back(std::nullopt);
+                    rolling3 = false;
+                }
+                else if(minimiser2 != current_neg_minimiser2 && (minimiser2_rank = r2.rank(minimiser2), r2.rank(minimiser2 + 1) - minimiser2_rank)) {
+                    const size_t p = s2_select.select(minimiser2_rank);
+                    no_skmers2 = s2_select.select(minimiser2_rank+1) - p;
+
+                    fill_buffer<2>(offsets2, buffer2, p, no_skmers2, shift);
+                    found = lookup_buffer<2>(buffer2, offsets2, no_skmers2, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser2_position, right_minimiser2_position, forward, unitig_begin, unitig_end);
+                    if(found) {
+                        uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                        current_uid = endpoints.rank(kmer_start + 1) - 2;
+                        results.push_back(LocateResult{text_pos, forward, current_uid,
+                            static_cast<uint32_t>(kmer_start - unitig_begin),
+                            static_cast<uint32_t>(unitig_end - unitig_begin)});
+                    }
+                    else
+                        results.push_back(std::nullopt);
+                    current_minimiser2 = minimiser2;
+                    current_neg_minimiser1 = minimiser1;
+                    rolling3 = false;
+                }
+                else {
+                    if(rolling3)
+                        update_minimiser<3>(window.kmer_value, window.kmer_value_rev, minimiser3, left_minimiser3_position, right_minimiser3_position);
+                    else {
+                        minimiser3 = find_minimiser<3>(window.kmer_value, window.kmer_value_rev, left_minimiser3_position, right_minimiser3_position);
+                        rolling3 = true;
+                    }
+
+                    if(minimiser3 == current_minimiser3) {
+                        found = lookup_buffer<3>(buffer3, offsets3, no_skmers3, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser3_position, right_minimiser3_position, forward, unitig_begin, unitig_end);
+                        if(found) {
+                            uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                            current_uid = endpoints.rank(kmer_start + 1) - 2;
+                            results.push_back(LocateResult{text_pos, forward, current_uid,
+                                static_cast<uint32_t>(kmer_start - unitig_begin),
+                                static_cast<uint32_t>(unitig_end - unitig_begin)});
+                        }
+                        else
+                            results.push_back(std::nullopt);
+                    }
+                    else if(minimiser3 != current_neg_minimiser3 && (minimiser3_rank = r3.rank(minimiser3), r3.rank(minimiser3 + 1) - minimiser3_rank)) {
+                        const size_t p = s3_select.select(minimiser3_rank);
+                        no_skmers3 = s3_select.select(minimiser3_rank+1) - p;
+
+                        fill_buffer<3>(offsets3, buffer3, p, no_skmers3, shift);
+                        found = lookup_buffer<3>(buffer3, offsets3, no_skmers3, window.kmer_value, window.kmer_value_rev, text_pos, left_minimiser3_position, right_minimiser3_position, forward, unitig_begin, unitig_end);
+                        if(found) {
+                            uint64_t kmer_start = forward ? (text_pos - k + 1) : text_pos;
+                            current_uid = endpoints.rank(kmer_start + 1) - 2;
+                            results.push_back(LocateResult{text_pos, forward, current_uid,
+                                static_cast<uint32_t>(kmer_start - unitig_begin),
+                                static_cast<uint32_t>(unitig_end - unitig_begin)});
+                        }
+                        else
+                            results.push_back(std::nullopt);
+                        current_minimiser3 = minimiser3;
+                        current_neg_minimiser1 = minimiser1;
+                        current_neg_minimiser2 = minimiser2;
+                    }
+                    else {
+                        uint64_t canonical = std::min<uint64_t>(window.kmer_value, window.kmer_value_rev);
+                        auto it = hashmap.find(canonical);
+                        if(it != hashmap.end()) {
+                            uint64_t stored_pos = it->second;
+                            uint64_t text_kmer = get_word64(stored_pos) & kmermask;
+                            forward = (text_kmer == window.kmer_value);
+                            text_pos = forward ? (stored_pos + k - 1) : stored_pos;
+                            uint64_t r = endpoints.rank(stored_pos + 1);
+                            current_uid = r - 2;
+                            unitig_begin = endpoints.select(r - 1);
+                            unitig_end = endpoints.select(r);
+                            results.push_back(LocateResult{text_pos, forward, current_uid,
+                                static_cast<uint32_t>(stored_pos - unitig_begin),
+                                static_cast<uint32_t>(unitig_end - unitig_begin)});
+                            found = true;
+                        }
+                        else {
+                            results.push_back(std::nullopt);
+                            found = false;
+                        }
+                        current_neg_minimiser1 = minimiser1;
+                        current_neg_minimiser2 = minimiser2;
+                        current_neg_minimiser3 = minimiser3;
+                    }
+                }
+            }
+        }
+    }
+
+    delete[] offsets1;
+    delete[] offsets2;
+    delete[] offsets3;
+    delete[] buffer1;
+    delete[] buffer2;
+    delete[] buffer3;
+}
