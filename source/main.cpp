@@ -99,6 +99,23 @@ int check_arguments(sharg::parser &parser, cmd_arguments &args) {
   } else if (args.cmd == "query-ref") {
     if (!parser.is_option_set('q'))
       throw sharg::user_input_error("provide query file.");
+  } else if (args.cmd == "lookup-raw") {
+    if (!parser.is_option_set('q'))
+      throw sharg::user_input_error("provide query file.");
+  } else if (args.cmd == "query-ref-raw") {
+    if (!parser.is_option_set('q'))
+      throw sharg::user_input_error("provide query file.");
+  } else if (args.cmd == "dump") {
+    if (!parser.is_option_set('q'))
+      throw sharg::user_input_error("provide query file.");
+    if (!parser.is_option_set('i'))
+      throw sharg::user_input_error("provide output file with -i.");
+  } else if (args.cmd == "point-bench") {
+    if (!parser.is_option_set('q'))
+      throw sharg::user_input_error("provide query file.");
+  } else if (args.cmd == "stream-bench") {
+    if (!parser.is_option_set('q'))
+      throw sharg::user_input_error("provide query file.");
   } else if (args.cmd != "bench")
     throw sharg::user_input_error("illegal command");
   return 0;
@@ -345,6 +362,302 @@ int main(int argc, char **argv) {
     std::cout << "time_per_kmer = "
               << (total_kmers > 0 ? (double)elapsed.count() / total_kmers : 0)
               << " ns\n";
+  } else if (args.cmd == "lookup-raw") {
+    // Like "lookup" but includes ASCII-to-2bit conversion inside the timer
+    // for fair comparison with piscem-cpp which parses from raw strings.
+    std::cout << "loading queries as raw strings...\n";
+    std::vector<std::string> raw_queries;
+    {
+      auto stream = seqan3::sequence_file_input<my_traits>{args.q};
+      for (auto &record : stream) {
+        std::string s;
+        for (auto c : record.sequence()) s += seqan3::to_char(c);
+        raw_queries.push_back(std::move(s));
+      }
+    }
+
+    RSHash index = RSHash();
+    index.load(args.d);
+    std::cout << "loaded index...\n";
+
+    uint64_t kmers = 0;
+    uint64_t found = 0;
+    uint64_t extensions = 0;
+
+    std::cout << "querying (including parse)...\n";
+    std::chrono::high_resolution_clock::time_point t_start =
+        std::chrono::high_resolution_clock::now();
+
+    for (auto &raw : raw_queries) {
+      // Convert ASCII to bitpacked inside the timed region
+      seqan3::bitpacked_sequence<seqan3::dna4> query;
+      query.resize(raw.size());
+      for (size_t i = 0; i < raw.size(); ++i) {
+        query[i] = seqan3::assign_char_to(raw[i], seqan3::dna4{});
+      }
+      found += index.streaming_lookup(query, extensions);
+      kmers += query.size() - index.getk() + 1;
+    }
+
+    std::chrono::high_resolution_clock::time_point t_stop =
+        std::chrono::high_resolution_clock::now();
+    auto elapsed =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_stop - t_start);
+
+    double ns_per_kmer = (double)elapsed.count() / kmers;
+
+    std::cout << "==== query report (raw):\n";
+    std::cout << "num_kmers = " << kmers << '\n';
+    std::cout << "num_positive_kmers = " << found << " ("
+              << (double)found / kmers * 100 << "%)\n";
+    std::cout << "time_per_kmer = " << ns_per_kmer << '\n';
+    std::cout << "extensions = " << extensions << '\n';
+  } else if (args.cmd == "query-ref-raw") {
+    // Like "query-ref" but includes ASCII parse inside the timer.
+    std::cout << "loading reference index...\n";
+    ReferenceIndex refidx;
+    refidx.load(args.d.string());
+
+    std::cout << "loading queries as raw strings...\n";
+    std::vector<std::string> raw_queries;
+    {
+      auto stream = seqan3::sequence_file_input<my_traits>{args.q};
+      for (auto &record : stream) {
+        std::string s;
+        for (auto c : record.sequence()) s += seqan3::to_char(c);
+        raw_queries.push_back(std::move(s));
+      }
+    }
+
+    const uint64_t kval = refidx.k();
+    auto &ctab = refidx.contig_table();
+    uint64_t total_kmers = 0;
+    uint64_t found_kmers = 0;
+    uint64_t extensions = 0;
+    uint64_t decoded = 0;
+    std::vector<std::optional<LocateResult>> results;
+
+    std::cout << "querying (including parse + locate)...\n";
+    std::chrono::high_resolution_clock::time_point t_start =
+        std::chrono::high_resolution_clock::now();
+
+    for (size_t qi = 0; qi < raw_queries.size(); ++qi) {
+      auto &raw = raw_queries[qi];
+      seqan3::bitpacked_sequence<seqan3::dna4> query;
+      query.resize(raw.size());
+      for (size_t i = 0; i < raw.size(); ++i) {
+        query[i] = seqan3::assign_char_to(raw[i], seqan3::dna4{});
+      }
+      if (query.size() < kval) continue;
+
+      results.clear();
+      refidx.streaming_query(query, results, extensions);
+      total_kmers += results.size();
+
+      for (size_t i = 0; i < results.size(); ++i) {
+        if (!results[i].has_value()) continue;
+        found_kmers++;
+        auto &loc = results[i].value();
+        auto span = ctab.entries(loc.unitig_id);
+        projected_hits hits{static_cast<uint32_t>(loc.unitig_id),
+                            loc.contig_pos,
+                            loc.is_forward,
+                            loc.contig_len,
+                            static_cast<uint32_t>(kval),
+                            span};
+        for (auto it = hits.refRange.begin(); it != hits.refRange.end(); ++it) {
+          decoded += hits.decode_hit(*it, ctab).pos;
+        }
+      }
+    }
+
+    std::chrono::high_resolution_clock::time_point t_stop =
+        std::chrono::high_resolution_clock::now();
+    auto elapsed =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t_stop - t_start);
+
+    std::cout << "==== query-ref-raw report:\n";
+    std::cout << "total_kmers = " << total_kmers << "\n";
+    std::cout << "found_kmers = " << found_kmers << " ("
+              << (total_kmers > 0 ? (double)found_kmers / total_kmers * 100 : 0)
+              << "%)\n";
+    std::cout << "decoded_positions = " << decoded << "\n";
+    std::cout << "extensions = " << extensions << "\n";
+    std::cout << "time_per_kmer = "
+              << (total_kmers > 0 ? (double)elapsed.count() / total_kmers : 0)
+              << " ns\n";
+  } else if (args.cmd == "point-bench") {
+    std::cout << "loading reference index...\n";
+    ReferenceIndex refidx;
+    refidx.load(args.d.string());
+
+    std::cout << "loading queries...\n";
+    std::vector<seqan3::bitpacked_sequence<seqan3::dna4>> queries;
+    load_file(args.q, queries);
+
+    uint64_t kmers = 0;
+    uint64_t found = 0;
+    uint64_t decoded = 0;
+    auto& ctab = refidx.contig_table();
+    auto& index = const_cast<RSHash&>(refidx.dict());
+
+    std::cout << "point-querying...\n";
+    auto t_start = std::chrono::high_resolution_clock::now();
+    for (auto &query : queries) {
+      if (query.size() < index.getk())
+        continue;
+      const uint64_t n = query.size() - index.getk() + 1;
+      kmers += n;
+      // Match kmerview encoding: first base at bits [0:1], last at bits [2*(k-1):2*(k-1)+1]
+      uint64_t kmer_fw = 0, kmer_rc = 0;
+      const uint64_t k = index.getk();
+      const uint64_t mask = (k < 32) ? ((1ULL << (2*k)) - 1) : ~0ULL;
+      for (uint64_t i = 0; i < k; ++i) {
+        uint64_t base = seqan3::to_rank(query[i]);
+        kmer_fw = (kmer_fw >> 2) | (base << (2*(k-1)));
+        kmer_rc = ((kmer_rc << 2) | (base ^ 3ULL)) & mask;
+      }
+      auto loc = index.locate_kmer(kmer_fw, kmer_rc);
+      if (loc.has_value()) {
+        found++;
+        for (auto v : ctab.entries(loc->unitig_id)) {
+          decoded += ctab.decode_pos(v);
+        }
+      }
+      for (uint64_t i = 1; i < n; ++i) {
+        uint64_t base = seqan3::to_rank(query[i + k - 1]);
+        kmer_fw = (kmer_fw >> 2) | (base << (2*(k-1)));
+        kmer_rc = ((kmer_rc << 2) | (base ^ 3ULL)) & mask;
+        loc = index.locate_kmer(kmer_fw, kmer_rc);
+        if (loc.has_value()) {
+          found++;
+          for (auto v : ctab.entries(loc->unitig_id)) {
+            decoded += ctab.decode_pos(v);
+          }
+        }
+      }
+    }
+    auto t_stop = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(t_stop - t_start);
+    double ns_per_kmer = (double)elapsed.count() / kmers;
+
+    std::cout << "==== point-lookup+locate report (rshash):\n";
+    std::cout << "num_kmers = " << kmers << "\n";
+    std::cout << "found_kmers = " << found << " ("
+              << (double)found / kmers * 100 << "%)\n";
+    std::cout << "decoded_positions = " << decoded << "\n";
+    std::cout << "time_per_kmer = " << ns_per_kmer << " ns\n";
+    std::cout << "total_time = " << (double)elapsed.count() / 1e9 << " s\n";
+  } else if (args.cmd == "stream-bench") {
+    std::cout << "loading reference index...\n";
+    ReferenceIndex refidx;
+    refidx.load(args.d.string());
+
+    std::cout << "loading queries...\n";
+    std::vector<seqan3::bitpacked_sequence<seqan3::dna4>> queries;
+    load_file(args.q, queries);
+
+    uint64_t kmers = 0;
+    uint64_t found = 0;
+    uint64_t extensions = 0;
+    uint64_t decoded = 0;
+    const uint64_t kval = refidx.k();
+    std::vector<std::optional<LocateResult>> results;
+    auto& ctab = refidx.contig_table();
+
+    std::cout << "streaming-querying...\n";
+    auto t_start = std::chrono::high_resolution_clock::now();
+    for (auto &query : queries) {
+      if (query.size() < kval) continue;
+      results.clear();
+      refidx.streaming_query(query, results, extensions);
+      kmers += query.size() - kval + 1;
+      uint64_t prev_uid = UINT64_MAX;
+      contig_span cached_span{};
+      for (auto& r : results) {
+        if (r.has_value()) {
+          found++;
+          uint64_t uid = r->unitig_id;
+          if (uid != prev_uid) {
+            prev_uid = uid;
+            cached_span = ctab.entries(uid);
+          }
+          for (auto v : cached_span) {
+            decoded += ctab.decode_pos(v);
+          }
+        }
+      }
+    }
+    auto t_stop = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(t_stop - t_start);
+    double ns_per_kmer = (double)elapsed.count() / kmers;
+
+    std::cout << "==== streaming lookup+locate report (rshash):\n";
+    std::cout << "num_kmers = " << kmers << "\n";
+    std::cout << "found_kmers = " << found << " ("
+              << (double)found / kmers * 100 << "%)\n";
+    std::cout << "decoded_positions = " << decoded << "\n";
+    std::cout << "extensions = " << extensions << "\n";
+    std::cout << "time_per_kmer = " << ns_per_kmer << " ns\n";
+    std::cout << "total_time = " << (double)elapsed.count() / 1e9 << " s\n";
+  } else if (args.cmd == "dump") {
+    std::cout << "loading reference index...\n";
+    ReferenceIndex refidx;
+    refidx.load(args.d.string());
+
+    std::cout << "loading queries...\n";
+    std::vector<seqan3::bitpacked_sequence<seqan3::dna4>> queries;
+    load_file(args.q, queries);
+
+    const uint64_t kval = refidx.k();
+    uint64_t extensions = 0;
+    std::vector<std::optional<LocateResult>> results;
+
+    std::ofstream out(args.i.string());
+    out << "seq_idx\tkmer_pos\tunitig_id\tcontig_pos\tcontig_len\tis_forward\n";
+
+    for (size_t qi = 0; qi < queries.size(); ++qi) {
+      auto &query = queries[qi];
+      if (query.size() < kval)
+        continue;
+
+      results.clear();
+      refidx.streaming_query(query, results, extensions);
+
+      for (size_t i = 0; i < results.size(); ++i) {
+        out << qi << '\t' << i << '\t';
+        if (results[i].has_value()) {
+          auto &loc = results[i].value();
+          out << loc.unitig_id << '\t' << loc.contig_pos << '\t'
+              << loc.contig_len << '\t' << loc.is_forward << '\n';
+        } else {
+          out << "-1\t-1\t-1\t0\n";
+        }
+      }
+    }
+
+    uint64_t total_kmers = 0;
+    uint64_t found_kmers = 0;
+    for (auto &q : queries) {
+      if (q.size() >= kval)
+        total_kmers += q.size() - kval + 1;
+    }
+    // Re-count found
+    for (size_t qi = 0; qi < queries.size(); ++qi) {
+      auto &query = queries[qi];
+      if (query.size() < kval)
+        continue;
+      results.clear();
+      uint64_t ext2 = 0;
+      refidx.streaming_query(query, results, ext2);
+      for (auto &r : results)
+        if (r.has_value())
+          found_kmers++;
+    }
+
+    std::cerr << "Dump complete: total=" << total_kmers
+              << " found=" << found_kmers
+              << " extensions=" << extensions << "\n";
   }
 
   return 0;
