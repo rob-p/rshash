@@ -501,6 +501,10 @@ int main(int argc, char **argv) {
     auto& ctab = refidx.contig_table();
     auto& index = const_cast<RSHash&>(refidx.dict());
 
+    auto [offsets_sz, buffer_sz] = refidx.query_buffer_sizes();
+    auto* offsets_buf = new uint64_t[offsets_sz];
+    auto* kmer_buf = new uint64_t[buffer_sz];
+
     std::cout << "point-querying...\n";
     auto t_start = std::chrono::high_resolution_clock::now();
     for (auto &query : queries) {
@@ -508,35 +512,38 @@ int main(int argc, char **argv) {
         continue;
       const uint64_t n = query.size() - index.getk() + 1;
       kmers += n;
-      // Match kmerview encoding: first base at bits [0:1], last at bits [2*(k-1):2*(k-1)+1]
       uint64_t kmer_fw = 0, kmer_rc = 0;
       const uint64_t k = index.getk();
       const uint64_t mask = (k < 32) ? ((1ULL << (2*k)) - 1) : ~0ULL;
+      uint64_t prev_uid = UINT64_MAX;
+      contig_span cached_span{};
       for (uint64_t i = 0; i < k; ++i) {
         uint64_t base = seqan3::to_rank(query[i]);
         kmer_fw = (kmer_fw >> 2) | (base << (2*(k-1)));
         kmer_rc = ((kmer_rc << 2) | (base ^ 3ULL)) & mask;
       }
-      auto loc = index.locate_kmer(kmer_fw, kmer_rc);
+      auto loc = index.locate_kmer(kmer_fw, kmer_rc, offsets_buf, kmer_buf);
       if (loc.has_value()) {
         found++;
-        for (auto v : ctab.entries(loc->unitig_id)) {
-          decoded += ctab.decode_pos(v);
-        }
+        uint64_t uid = loc->unitig_id;
+        if (uid != prev_uid) { prev_uid = uid; cached_span = ctab.entries(uid); }
+        for (auto v : cached_span) { decoded += ctab.decode_pos(v); }
       }
       for (uint64_t i = 1; i < n; ++i) {
         uint64_t base = seqan3::to_rank(query[i + k - 1]);
         kmer_fw = (kmer_fw >> 2) | (base << (2*(k-1)));
         kmer_rc = ((kmer_rc << 2) | (base ^ 3ULL)) & mask;
-        loc = index.locate_kmer(kmer_fw, kmer_rc);
+        loc = index.locate_kmer(kmer_fw, kmer_rc, offsets_buf, kmer_buf);
         if (loc.has_value()) {
           found++;
-          for (auto v : ctab.entries(loc->unitig_id)) {
-            decoded += ctab.decode_pos(v);
-          }
+          uint64_t uid = loc->unitig_id;
+          if (uid != prev_uid) { prev_uid = uid; cached_span = ctab.entries(uid); }
+          for (auto v : cached_span) { decoded += ctab.decode_pos(v); }
         }
       }
     }
+    delete[] offsets_buf;
+    delete[] kmer_buf;
     auto t_stop = std::chrono::high_resolution_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(t_stop - t_start);
     double ns_per_kmer = (double)elapsed.count() / kmers;
@@ -562,32 +569,47 @@ int main(int argc, char **argv) {
     uint64_t extensions = 0;
     uint64_t decoded = 0;
     const uint64_t kval = refidx.k();
-    std::vector<std::optional<LocateResult>> results;
     auto& ctab = refidx.contig_table();
+
+    auto [offsets_sz, buffer_sz] = refidx.query_buffer_sizes();
+    auto* offsets_buf = new uint64_t[offsets_sz];
+    auto* kmer_buf = new uint64_t[buffer_sz];
+
+    struct BenchCtx {
+        uint64_t found = 0;
+        uint64_t decoded = 0;
+        uint64_t prev_uid = UINT64_MAX;
+        contig_span cached_span{};
+        ContigTable* ctab;
+    } bench_ctx;
+    bench_ctx.ctab = &ctab;
+
+    auto on_hit = [](void* ctx, const LocateResult& loc) {
+        auto& c = *static_cast<BenchCtx*>(ctx);
+        c.found++;
+        uint64_t uid = loc.unitig_id;
+        if (uid != c.prev_uid) {
+            c.prev_uid = uid;
+            c.cached_span = c.ctab->entries(uid);
+        }
+        for (auto v : c.cached_span) {
+            c.decoded += c.ctab->decode_pos(v);
+        }
+    };
 
     std::cout << "streaming-querying...\n";
     auto t_start = std::chrono::high_resolution_clock::now();
     for (auto &query : queries) {
       if (query.size() < kval) continue;
-      results.clear();
-      refidx.streaming_query(query, results, extensions);
       kmers += query.size() - kval + 1;
-      uint64_t prev_uid = UINT64_MAX;
-      contig_span cached_span{};
-      for (auto& r : results) {
-        if (r.has_value()) {
-          found++;
-          uint64_t uid = r->unitig_id;
-          if (uid != prev_uid) {
-            prev_uid = uid;
-            cached_span = ctab.entries(uid);
-          }
-          for (auto v : cached_span) {
-            decoded += ctab.decode_pos(v);
-          }
-        }
-      }
+      bench_ctx.prev_uid = UINT64_MAX;
+      refidx.streaming_query_cb(query, extensions, offsets_buf, kmer_buf, &bench_ctx, on_hit);
     }
+    found = bench_ctx.found;
+    decoded = bench_ctx.decoded;
+
+    delete[] offsets_buf;
+    delete[] kmer_buf;
     auto t_stop = std::chrono::high_resolution_clock::now();
     auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(t_stop - t_start);
     double ns_per_kmer = (double)elapsed.count() / kmers;

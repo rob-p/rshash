@@ -64,6 +64,14 @@ public:
         m_dict.streaming_query_ref(query, results, extensions);
     }
 
+    void streaming_query_cb(const seqan3::bitpacked_sequence<seqan3::dna4>& query,
+                            uint64_t& extensions, uint64_t* offsets_buf, uint64_t* kmer_buf,
+                            void* ctx, streaming_hit_fn_t on_hit) const {
+        m_dict.streaming_query_ref_cb(query, extensions, offsets_buf, kmer_buf, ctx, on_hit);
+    }
+
+    std::pair<uint64_t, uint64_t> query_buffer_sizes() const { return m_dict.query_buffer_sizes(); }
+
     uint64_t k() const { return m_dict.getk(); }
     uint64_t num_refs() const { return m_ref_names.size(); }
     const std::string& ref_name(size_t i) const { return m_ref_names[i]; }

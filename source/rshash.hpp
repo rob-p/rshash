@@ -35,6 +35,8 @@ struct LocateResult {
     uint32_t contig_len;
 };
 
+using streaming_hit_fn_t = void(*)(void* ctx, const LocateResult& loc);
+
 // struct MinimizerInfo32 {
 //     uint64_t minimizer_value;
 //     uint32_t position;
@@ -117,13 +119,13 @@ private:
     template<int level>
     inline void fill_buffer(uint64_t *, uint64_t *, size_t, size_t, const uint64_t);
     template<int level>
-    inline bool check_overlap(uint64_t, uint64_t, uint64_t &, uint64_t &);
+    inline bool check_overlap(uint64_t, uint64_t, uint64_t &, uint64_t &, uint64_t &);
     template<int level>
-    inline bool check_minimiser_pos(uint64_t *, const uint64_t, const uint64_t, const uint64_t, const size_t, const size_t, const size_t, bool &, uint64_t &, uint64_t &, uint64_t &);
+    inline bool check_minimiser_pos(uint64_t *, const uint64_t, const uint64_t, const uint64_t, const size_t, const size_t, const size_t, bool &, uint64_t &, uint64_t &, uint64_t &, uint64_t &);
     template<int level>
-    inline bool check_minimiser_pos2(uint64_t *, const uint64_t, const uint64_t, const uint64_t, const size_t, const size_t, const size_t, const size_t, bool &, uint64_t &, uint64_t &, uint64_t &);
+    inline bool check_minimiser_pos2(uint64_t *, const uint64_t, const uint64_t, const uint64_t, const size_t, const size_t, const size_t, const size_t, bool &, uint64_t &, uint64_t &, uint64_t &, uint64_t &);
     template<int level>
-    inline bool lookup_buffer(uint64_t *, uint64_t *, const size_t, const uint64_t,  const uint64_t, uint64_t &, const size_t, const size_t, bool &, uint64_t &, uint64_t &);
+    inline bool lookup_buffer(uint64_t *, uint64_t *, const size_t, const uint64_t,  const uint64_t, uint64_t &, const size_t, const size_t, bool &, uint64_t &, uint64_t &, uint64_t &);
     inline bool extend_in_text(uint64_t&, uint64_t, uint64_t, bool, const uint64_t, const uint64_t);
     const inline uint64_t get_word64(uint64_t pos);
     const inline uint64_t get_base(uint64_t pos);
@@ -143,6 +145,8 @@ private:
     void streaming_query_ref1(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::optional<LocateResult>>&, uint64_t&);
     void streaming_query_ref2(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::optional<LocateResult>>&, uint64_t&);
     void streaming_query_ref3(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::optional<LocateResult>>&, uint64_t&);
+
+    void streaming_query_ref1_cb(const seqan3::bitpacked_sequence<seqan3::dna4>&, uint64_t&, uint64_t*, uint64_t*, void*, streaming_hit_fn_t);
 
 public:
     RSHash() : endpoints(std::vector<uint64_t>{}, 1),
@@ -171,6 +175,7 @@ public:
     uint64_t num_real_unitigs() { return endpoints.rank(endpoints.size()) - 2; }
     size_t unitig_size(uint64_t unitig_id) { return endpoints.select(unitig_id+1) - endpoints.select(unitig_id) - k + 1; }
     std::optional<LocateResult> locate_kmer(uint64_t kmer_fw, uint64_t kmer_rc);
+    std::optional<LocateResult> locate_kmer(uint64_t kmer_fw, uint64_t kmer_rc, uint64_t* offsets_buf, uint64_t* kmer_buffer);
     // std::vector<uint64_t> rand_text_kmers(const uint64_t);
     const inline uint64_t access(const uint64_t, const size_t);
     uint64_t lookup(const std::vector<uint64_t>&);
@@ -178,6 +183,8 @@ public:
     uint64_t streaming_lookup(const seqan3::bitpacked_sequence<seqan3::dna4>&, uint64_t&);
     void streaming_locate(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::pair<uint64_t, bool>> &positions);
     void streaming_query_ref(const seqan3::bitpacked_sequence<seqan3::dna4>&, std::vector<std::optional<LocateResult>>&, uint64_t&);
+    void streaming_query_ref_cb(const seqan3::bitpacked_sequence<seqan3::dna4>&, uint64_t&, uint64_t*, uint64_t*, void*, streaming_hit_fn_t);
+    std::pair<uint64_t, uint64_t> query_buffer_sizes() const { return {m_thres1, m_thres1 * span1}; }
     int save(const std::filesystem::path&);
     int load(const std::filesystem::path&);
     void print_info() {
